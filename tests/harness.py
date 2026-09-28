@@ -36,6 +36,10 @@ LOG10_EQUAD = float(np.log10(3e-7))
 LOG10_ECORR = float(np.log10(2e-7))
 TOAS_PER_SESSION = 3
 
+# DM reference radio frequency [MHz], shared the same way: `build` hands it to
+# `PTA_Data`, and `design_blocks` applies the chromatic scaling with it.
+DM_REF_FREQ = 1400.0
+
 ZERO_ORF = lambda angle: jnp.zeros_like(jnp.asarray(angle))
 ORFS = {"hd": hd_orf, "zero": ZERO_ORF}
 
@@ -131,7 +135,7 @@ def build(npsr=2, model_string="ltm|unc+cor->unc", linear_timing=True,
         fixed_white_noise_params=None,
         linear_timing=linear_timing, marg_timing=marg_timing,
         diag_white_cov=False, fixed_res=False,
-        timfiles=None, parfiles=None, noise_dict=None, dm_ref_freq=1400,
+        timfiles=None, parfiles=None, noise_dict=None, dm_ref_freq=DM_REF_FREQ,
     )
     wn = WhiteCov(data=data, stabilize_TNT=False, include_ecorr=include_ecorr)
     rn = ModelBuilder(data=data).make_red_noise(
@@ -182,7 +186,8 @@ def design_blocks(model, include_timing=None):
 
     Column order follows `SuperSignal.build_basis`: the timing prefix, then the
     shared block (with `cor` nested at its head), then each separate block in
-    the order the model string lists them.
+    the order the model string lists them.  ``F_dm`` is chromatic: each TOA's
+    row is scaled by ``(DM_REF_FREQ / f_radio)**2``.
     """
     if include_timing is None:
         include_timing = model.n_tm > 0
@@ -198,7 +203,8 @@ def design_blocks(model, include_timing=None):
             parts.append(Mp)
         parts.append(ref.fourier_basis(p.toas, f_irn))
         if model.n_dm:
-            parts.append(ref.fourier_basis(p.toas, f_dm))
+            chromatic = (DM_REF_FREQ / np.asarray(p.freqs, dtype=np.float64)) ** 2
+            parts.append(ref.fourier_basis(p.toas, f_dm) * chromatic[:, None])
         if model.n_gtm:
             parts.append(np.asarray(model.adaptus_basis[i], dtype=np.float64))
         blocks.append(np.hstack(parts))
