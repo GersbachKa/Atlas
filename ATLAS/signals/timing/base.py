@@ -823,6 +823,39 @@ def setup_timing_model(par_path: str, tim_path: str,
         """Return sampled value (traced) or frozen Python float constant."""
         return theta[k_name] if k_name in sampled_names else theta_0_full[k_name]
 
+    # ---- 3d. DDK Kopeikin geometry (constant; mirrors JUG's _prepare_ddk_kopeikin) ----
+    # JUG's combined_delays only applies the K95 parallax / K96 proper-motion terms
+    # (the only places KOM enters) when it is given the observer position, PX, the
+    # sky position and the proper motion. For ecliptic par files KOM is measured in
+    # the ecliptic frame, so the observer position is rotated into it.
+    is_ddk = binary_kind == 'ddk'
+    if is_ddk:
+        from jug.io.par_reader import OBLIQUITY_ARCSEC
+        obs_ls = np.asarray(result['ssb_obs_pos_ls'], dtype=np.float64)       # (ntoa, 3)
+        if is_ecliptic:
+            ecl_frame = str(params.get('_ecliptic_frame', params.get('ECL', 'IERS2010'))).upper()
+            obl = OBLIQUITY_ARCSEC.get(ecl_frame, OBLIQUITY_ARCSEC['IERS2010']) * np.pi / (180.0 * 3600.0)
+            obs_ls = np.column_stack([obs_ls[:, 0],
+                                      obs_ls[:, 1] * np.cos(obl) + obs_ls[:, 2] * np.sin(obl),
+                                      -obs_ls[:, 1] * np.sin(obl) + obs_ls[:, 2] * np.cos(obl)])
+        # PX, sky position and proper motion enter the Kopeikin terms at their par values,
+        # as in PINT and JUG: their design-matrix columns for PX / PM omit the (sub-ns) binary
+        # cross-terms, so tracing them here would make validate()'s PINT-vs-JUG check fail.
+        # KIN and KOM themselves stay live through combined_delays' kin/kom arguments.
+        if is_ecliptic:
+            lon = np.radians(float(theta_0_full['ELONG'])); lat = np.radians(float(theta_0_full['ELAT']))
+            pm_lon, pm_lat = float(theta_0_full['PMELONG']), float(theta_0_full['PMELAT'])
+        else:
+            lon, lat = float(theta_0_full['RAJ']), float(theta_0_full['DECJ'])
+            pm_lon, pm_lat = float(theta_0_full['PMRA']), float(theta_0_full['PMDEC'])
+        to_rad_s = _MAS_YR_TO_RAD_DAY / SECS_PER_DAY                        # mas/yr -> rad/s
+        ddk_kw_const = dict(obs_pos_ls=jnp.asarray(obs_ls), px=float(theta_0_full['PX']),
+                            sin_ra=np.sin(lon), cos_ra=np.cos(lon),
+                            sin_dec=np.sin(lat), cos_dec=np.cos(lat), k96=True,
+                            pmra_rad_per_sec=pm_lon * to_rad_s, pmdec_rad_per_sec=pm_lat * to_rad_s)
+    else:
+        ddk_kw_const = {}
+
     # ---- 7. Total timing model in seconds ----------------------------------
     @jax.jit
     def m_total_sec(theta: dict) -> jnp.ndarray:
@@ -972,6 +1005,7 @@ def setup_timing_model(par_path: str, tim_path: str,
                 fb_coeffs, _FB_FACTORIALS, 0.0, use_fb,
                 dr=DR, dth=DTH,
                 tropo_sec=tropo_prebin, tt_binary_sec=tt_binary_sec,
+                **ddk_kw_const,     # DDK Kopeikin geometry (empty for DD/BT)
             )
 
         # --- Spindown Taylor series (θ₀-referenced) ---
